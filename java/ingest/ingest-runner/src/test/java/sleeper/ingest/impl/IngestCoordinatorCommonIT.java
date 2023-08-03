@@ -49,7 +49,9 @@ import sleeper.statestore.StateStore;
 import sleeper.statestore.StateStoreException;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -64,6 +66,7 @@ import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 import static java.nio.file.Files.createTempDirectory;
+import static org.assertj.core.api.Assertions.assertThat;
 import static sleeper.ingest.testutils.IngestCoordinatorTestHelper.parquetConfiguration;
 import static sleeper.ingest.testutils.IngestCoordinatorTestHelper.standardIngestCoordinatorBuilder;
 
@@ -572,6 +575,7 @@ public class IngestCoordinatorCommonIT {
         Map<Integer, Integer> partitionNoToExpectedNoOfFilesMap = Stream.of(
                         new AbstractMap.SimpleEntry<>(0, 0))
                 .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+
         ingestAndVerify(recordListAndSchema,
                 keyAndDimensionToSplitOnInOrder,
                 recordListAndSchema.recordList,
@@ -638,6 +642,30 @@ public class IngestCoordinatorCommonIT {
                 ingestCoordinator.write(record);
             }
         }
+
+
+        assertThat(getFilesLeftInWorkingDirectory(ingestLocalWorkingDirectory)).isEmpty();
+        assertThat(stateStore.getActiveFiles()).hasSize(
+                partitionNoToExpectedNoOfFilesMap.values().stream()
+                        .mapToInt(Integer::valueOf)
+                        .sum()
+        );
+
+
+        Map<Integer, List<Record>> allPartitionNoMap = getAllPartitionNoMap(
+                recordListAndSchema.sleeperSchema,
+                recordListAndSchema.recordList,
+                keyToPartitionNoMappingFn
+        );
+        assertThat(allPartitionNoMap.keySet()).allMatch(partitionNoToExpectedNoOfFilesMap::containsKey);
+
+        /*allPartitionNoSet.forEach(partitionNo -> verifyPartition(
+                recordListAndSchema.sleeperSchema,
+                partitionNoToFileInfosMap.getOrDefault(partitionNo, Collections.emptyList()),
+                partitionNoToExpectedNoOfFilesMap.get(partitionNo),
+                partitionNoToExpectedRecordsMap.getOrDefault(partitionNo, Collections.emptyList()),
+                hadoopConfiguration));*/
+
         ResultVerifier.verify(
                 stateStore,
                 recordListAndSchema.sleeperSchema,
@@ -646,5 +674,28 @@ public class IngestCoordinatorCommonIT {
                 partitionNoToExpectedNoOfFilesMap,
                 AWS_EXTERNAL_RESOURCE.getHadoopConfiguration(),
                 ingestLocalWorkingDirectory);
+    }
+
+    private List<String> getFilesLeftInWorkingDirectory(String localWorkingDirectory) throws IOException {
+        java.nio.file.Path localWorkingDirectoryPath = Paths.get(localWorkingDirectory);
+
+        return (Files.exists(localWorkingDirectoryPath)) ?
+                Files.walk(localWorkingDirectoryPath)
+                        .filter(Files::isRegularFile)
+                        .map(java.nio.file.Path::toString)
+                        .collect(Collectors.toList()) :
+                Collections.emptyList();
+    }
+
+
+    private Map<Integer, List<Record>> getAllPartitionNoMap(
+            Schema sleeperSchema,
+            List<Record> expectedRecords,
+            Function<Key, Integer> keyToPartitionNoMappingFn
+    ) {
+        return expectedRecords.stream()
+                .collect(Collectors.groupingBy(
+                        record -> keyToPartitionNoMappingFn
+                                .apply(Key.create(record.getValues(sleeperSchema.getRowKeyFieldNames())))));
     }
 }

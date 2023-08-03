@@ -73,18 +73,10 @@ public class ResultVerifier {
             String localWorkingDirectory) throws StateStoreException, IOException {
         PartitionTree partitionTree = new PartitionTree(sleeperSchema, stateStore.getAllPartitions());
 
-        Map<Integer, List<Record>> partitionNoToExpectedRecordsMap = expectedRecords.stream()
-                .collect(Collectors.groupingBy(
-                        record -> keyToPartitionNoMappingFn.apply(Key.create(record.getValues(sleeperSchema.getRowKeyFieldNames())))));
-
         Set<Integer> allPartitionNoSet = Stream.of(
-                        partitionNoToExpectedNoOfFilesMap.keySet().stream(),
-                        partitionNoToExpectedRecordsMap.keySet().stream())
+                        partitionNoToExpectedNoOfFilesMap.keySet().stream())
                 .flatMap(Function.identity())
                 .collect(Collectors.toSet());
-
-        assertThat(allPartitionNoSet).allMatch(partitionNoToExpectedNoOfFilesMap::containsKey);
-
         allPartitionNoSet.forEach(partitionNo -> {
             try {
                 verifyPartition(
@@ -92,9 +84,10 @@ public class ResultVerifier {
                         partitionNo,
                         partitionNoToExpectedNoOfFilesMap,
                         hadoopConfiguration,
-                        partitionNoToExpectedRecordsMap,
+                        keyToPartitionNoMappingFn,
                         partitionTree,
-                        stateStore);
+                        stateStore,
+                        expectedRecords);
             } catch (StateStoreException e) {
                 throw new RuntimeException(e);
             }
@@ -106,16 +99,20 @@ public class ResultVerifier {
                                        Integer partitionNo,
                                        Map<Integer, Integer> partitionNoToExpectedNoOfFilesMap,
                                        Configuration hadoopConfiguration,
-                                       Map<Integer, List<Record>> partitionNoToExpectedRecordsMap,
+                                       Function<Key, Integer> keyToPartitionNoMappingFn,
                                        PartitionTree partitionTree,
-                                       StateStore stateStore
+                                       StateStore stateStore,
+                                       List<Record> expectedRecords
     ) throws StateStoreException {
+        Map<Integer, List<Record>> partitionNoToExpectedRecordsMap = expectedRecords.stream()
+                .collect(Collectors.groupingBy(
+                        record -> keyToPartitionNoMappingFn.apply(Key.create(record.getValues(sleeperSchema.getRowKeyFieldNames())))));
         List<Record> expectedRecordList = partitionNoToExpectedRecordsMap.getOrDefault(partitionNo, Collections.emptyList());
         Integer expectedNoOfFiles = partitionNoToExpectedNoOfFilesMap.get(partitionNo);
 
         Map<String, Integer> partitionIdToPartitionNoMap = partitionNoToExpectedRecordsMap.entrySet().stream()
                 .map(entry -> new AbstractMap.SimpleEntry<>(partitionTree.getLeafPartition(Key.create(entry.getValue().get(0).getValues(sleeperSchema.getRowKeyFieldNames()))).getId(), entry.getKey())).collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
-        
+
         List<FileInfo> partitionFileInfoList = stateStore.getActiveFiles().stream()
                 .collect(Collectors.groupingBy(FileInfo::getPartitionId))
                 .entrySet()

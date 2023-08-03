@@ -30,6 +30,7 @@ import org.testcontainers.containers.localstack.LocalStackContainer;
 import sleeper.core.iterator.IteratorException;
 import sleeper.core.iterator.impl.AdditionIterator;
 import sleeper.core.key.Key;
+import sleeper.core.partition.PartitionTree;
 import sleeper.core.record.Record;
 import sleeper.core.schema.Schema;
 import sleeper.core.schema.type.ByteArrayType;
@@ -44,7 +45,6 @@ import sleeper.ingest.testutils.AwsExternalResource;
 import sleeper.ingest.testutils.PartitionedTableCreator;
 import sleeper.ingest.testutils.QuinFunction;
 import sleeper.ingest.testutils.RecordGenerator;
-import sleeper.ingest.testutils.ResultVerifier;
 import sleeper.statestore.StateStore;
 import sleeper.statestore.StateStoreException;
 
@@ -69,6 +69,7 @@ import static java.nio.file.Files.createTempDirectory;
 import static org.assertj.core.api.Assertions.assertThat;
 import static sleeper.ingest.testutils.IngestCoordinatorTestHelper.parquetConfiguration;
 import static sleeper.ingest.testutils.IngestCoordinatorTestHelper.standardIngestCoordinatorBuilder;
+import static sleeper.ingest.testutils.ResultVerifier.verifyPartition;
 
 public class IngestCoordinatorCommonIT {
     @RegisterExtension
@@ -629,7 +630,7 @@ public class IngestCoordinatorCommonIT {
                 AWS_EXTERNAL_RESOURCE.getDynamoDBClient(),
                 recordListAndSchema.sleeperSchema,
                 keyAndDimensionToSplitOnInOrder);
-        // A deep working directory forces the ingest coordinator to create a deep tree of directories
+
         String ingestLocalWorkingDirectory = createTempDirectory(temporaryFolder, null).toString() + "/path/to/new/sub/directory";
         try (IngestCoordinator<Record> ingestCoordinator =
                      ingestCoordinatorFactoryFn.apply(
@@ -644,36 +645,35 @@ public class IngestCoordinatorCommonIT {
         }
 
 
+        Map<Integer, List<Record>> allPartitionNoMap = getAllPartitionNoMap(
+                recordListAndSchema.sleeperSchema,
+                recordListAndSchema.recordList,
+                keyToPartitionNoMappingFn
+        );
         assertThat(getFilesLeftInWorkingDirectory(ingestLocalWorkingDirectory)).isEmpty();
         assertThat(stateStore.getActiveFiles()).hasSize(
                 partitionNoToExpectedNoOfFilesMap.values().stream()
                         .mapToInt(Integer::valueOf)
                         .sum()
         );
-
-
-        Map<Integer, List<Record>> allPartitionNoMap = getAllPartitionNoMap(
-                recordListAndSchema.sleeperSchema,
-                recordListAndSchema.recordList,
-                keyToPartitionNoMappingFn
-        );
         assertThat(allPartitionNoMap.keySet()).allMatch(partitionNoToExpectedNoOfFilesMap::containsKey);
 
-        /*allPartitionNoSet.forEach(partitionNo -> verifyPartition(
-                recordListAndSchema.sleeperSchema,
-                partitionNoToFileInfosMap.getOrDefault(partitionNo, Collections.emptyList()),
-                partitionNoToExpectedNoOfFilesMap.get(partitionNo),
-                partitionNoToExpectedRecordsMap.getOrDefault(partitionNo, Collections.emptyList()),
-                hadoopConfiguration));*/
 
-        ResultVerifier.verify(
-                stateStore,
-                recordListAndSchema.sleeperSchema,
-                keyToPartitionNoMappingFn,
-                expectedRecordsList,
-                partitionNoToExpectedNoOfFilesMap,
-                AWS_EXTERNAL_RESOURCE.getHadoopConfiguration(),
-                ingestLocalWorkingDirectory);
+        allPartitionNoMap.keySet().forEach(partitionNo -> {
+            try {
+                verifyPartition(
+                        recordListAndSchema.sleeperSchema,
+                        partitionNo,
+                        partitionNoToExpectedNoOfFilesMap,
+                        AWS_EXTERNAL_RESOURCE.getHadoopConfiguration(),
+                        keyToPartitionNoMappingFn,
+                        new PartitionTree(recordListAndSchema.sleeperSchema, stateStore.getAllPartitions()),
+                        stateStore,
+                        expectedRecordsList);
+            } catch (StateStoreException e) {
+                throw new RuntimeException(e);
+            }
+        });
     }
 
     private List<String> getFilesLeftInWorkingDirectory(String localWorkingDirectory) throws IOException {

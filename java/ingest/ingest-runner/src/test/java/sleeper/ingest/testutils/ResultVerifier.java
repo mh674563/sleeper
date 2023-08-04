@@ -16,6 +16,7 @@
 package sleeper.ingest.testutils;
 
 import com.facebook.collections.ByteArray;
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.datasketches.quantiles.ItemsSketch;
 import org.apache.datasketches.quantiles.ItemsUnion;
 import org.apache.hadoop.conf.Configuration;
@@ -23,6 +24,7 @@ import org.apache.hadoop.fs.Path;
 import org.apache.parquet.hadoop.ParquetReader;
 
 import sleeper.core.iterator.CloseableIterator;
+import sleeper.core.iterator.IteratorException;
 import sleeper.core.iterator.MergingIterator;
 import sleeper.core.key.Key;
 import sleeper.core.partition.PartitionTree;
@@ -34,6 +36,7 @@ import sleeper.core.schema.Schema;
 import sleeper.core.schema.type.ByteArrayType;
 import sleeper.core.schema.type.LongType;
 import sleeper.core.schema.type.PrimitiveType;
+import sleeper.ingest.impl.IngestCoordinator;
 import sleeper.io.parquet.record.ParquetReaderIterator;
 import sleeper.io.parquet.record.ParquetRecordReader;
 import sleeper.sketches.Sketches;
@@ -53,9 +56,10 @@ import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
-import java.util.stream.Stream;
 
+import static java.nio.file.Files.createTempDirectory;
 import static org.assertj.core.api.Assertions.assertThat;
+import static sleeper.ingest.impl.IngestCoordinatorCommonIT.AWS_EXTERNAL_RESOURCE;
 
 public class ResultVerifier {
     private static final double QUANTILE_SKETCH_TOLERANCE = 0.01;
@@ -63,35 +67,62 @@ public class ResultVerifier {
     private ResultVerifier() {
     }
 
-    public static void verify(
+    public static Pair<String, Map<Integer, List<Record>>> verify(
             StateStore stateStore,
-            Schema sleeperSchema,
-            Function<Key, Integer> keyToPartitionNoMappingFn,
-            List<Record> expectedRecords,
+            java.nio.file.Path temporaryFolder,
+            QuinFunction<StateStore, Schema, String, String, java.nio.file.Path, IngestCoordinator<Record>> ingestCoordinatorFactoryFn,
+            RecordGenerator.RecordListAndSchema recordListAndSchema,
             Map<Integer, Integer> partitionNoToExpectedNoOfFilesMap,
-            Configuration hadoopConfiguration,
-            String localWorkingDirectory) throws StateStoreException, IOException {
-        PartitionTree partitionTree = new PartitionTree(sleeperSchema, stateStore.getAllPartitions());
+            String sleeperIteratorClassName,
+            List<Record> expectedRecordsList,
+            Function<Key, Integer> keyToPartitionNoMappingFn
+    ) throws StateStoreException, IOException, IteratorException {
 
-        Set<Integer> allPartitionNoSet = Stream.of(
-                        partitionNoToExpectedNoOfFilesMap.keySet().stream())
-                .flatMap(Function.identity())
-                .collect(Collectors.toSet());
-        allPartitionNoSet.forEach(partitionNo -> {
+        String ingestLocalWorkingDirectory = createTempDirectory(temporaryFolder, null).toString() + "/path/to/new/sub/directory";
+        try (IngestCoordinator<Record> ingestCoordinator =
+                     ingestCoordinatorFactoryFn.apply(
+                             stateStore,
+                             recordListAndSchema.sleeperSchema,
+                             sleeperIteratorClassName,
+                             ingestLocalWorkingDirectory,
+                             temporaryFolder)) {
+            for (Record record : recordListAndSchema.recordList) {
+                ingestCoordinator.write(record);
+            }
+        }
+        Map<Integer, List<Record>> allPartitionNoMap = getAllPartitionNoMap(
+                recordListAndSchema.sleeperSchema,
+                recordListAndSchema.recordList,
+                keyToPartitionNoMappingFn
+        );
+        allPartitionNoMap.keySet().forEach(partitionNo -> {
             try {
                 verifyPartition(
-                        sleeperSchema,
+                        recordListAndSchema.sleeperSchema,
                         partitionNo,
                         partitionNoToExpectedNoOfFilesMap,
-                        hadoopConfiguration,
+                        AWS_EXTERNAL_RESOURCE.getHadoopConfiguration(),
                         keyToPartitionNoMappingFn,
-                        partitionTree,
+                        new PartitionTree(recordListAndSchema.sleeperSchema, stateStore.getAllPartitions()),
                         stateStore,
-                        expectedRecords);
+                        expectedRecordsList);
             } catch (StateStoreException e) {
                 throw new RuntimeException(e);
             }
         });
+
+        return Pair.of(ingestLocalWorkingDirectory, allPartitionNoMap);
+    }
+
+    private static Map<Integer, List<Record>> getAllPartitionNoMap(
+            Schema sleeperSchema,
+            List<Record> expectedRecords,
+            Function<Key, Integer> keyToPartitionNoMappingFn
+    ) {
+        return expectedRecords.stream()
+                .collect(Collectors.groupingBy(
+                        record -> keyToPartitionNoMappingFn
+                                .apply(Key.create(record.getValues(sleeperSchema.getRowKeyFieldNames())))));
     }
 
 
